@@ -1,13 +1,44 @@
-# Build output
+# Build output directories
+output/
 build/
-build-*/
 
-# Reference implementation
-reference/
+# RPM packages
+*.rpm
 
-# Node modules
-node_modules/
+# Archive files
+*.exe
+*.zip
+*.tar.gz
+*.tgz
 
-# OS-specific files
+# Temporary files
+*.tmp
+*.temp
 .DS_Store
 Thumbs.db
+
+# Icon extraction artifacts
+*.ico
+*.png
+
+# Log files
+*.log
+
+# Node.js dependencies (if any)
+node_modules/
+npm-debug.log*
+
+# Container build context (if using Docker)
+.dockerignore
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# System files
+.env
+.env.local
+.env.*.local

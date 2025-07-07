@@ -1,8 +1,81 @@
 #!/bin/bash
 set -e
 
-# Update this URL when a new version of Claude Desktop is released
+# Function to get the latest Claude Desktop download URL
+get_latest_claude_url() {
+    echo "🔍 Fetching latest Claude Desktop download URL..." >&2
+    
+    # Known working fallback URL (update this if needed)
+    local fallback_url="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe"
+    
+    # Try to get the download page with proper headers to bypass simple bot detection
+    local download_page=$(curl -s -L \
+        -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" \
+        -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
+        -H "Accept-Language: en-US,en;q=0.5" \
+        -H "Connection: keep-alive" \
+        "https://claude.ai/download" 2>/dev/null)
+    
+    local claude_url=""
+    
+    # Check if we got content and try multiple extraction patterns
+    if [ -n "$download_page" ]; then
+        # Pattern 1: Direct .exe links with Claude in the name
+        claude_url=$(echo "$download_page" | grep -oP 'https://[^"]*Claude[^"]*\.exe' | head -1)
+        
+        # Pattern 2: Storage URLs with osprey (known pattern)
+        if [ -z "$claude_url" ]; then
+            claude_url=$(echo "$download_page" | grep -oP 'https://storage\.googleapis\.com/[^"]*osprey[^"]*\.exe' | head -1)
+        fi
+        
+        # Pattern 3: Storage URLs with nest-win-x64 (specific pattern for Windows)
+        if [ -z "$claude_url" ]; then
+            claude_url=$(echo "$download_page" | grep -oP 'https://storage\.googleapis\.com/[^"]*nest-win-x64[^"]*\.exe' | head -1)
+        fi
+        
+        # Pattern 4: Any storage.googleapis.com .exe file
+        if [ -z "$claude_url" ]; then
+            claude_url=$(echo "$download_page" | grep -oP 'https://storage\.googleapis\.com/[^"]*\.exe' | head -1)
+        fi
+        
+        # Pattern 5: Look for download URLs in script tags or JSON (for React apps)
+        if [ -z "$claude_url" ]; then
+            claude_url=$(echo "$download_page" | grep -oP '"https://[^"]*Claude[^"]*\.exe"' | sed 's/"//g' | head -1)
+        fi
+    fi
+    
+    # If no URL found or download failed, use fallback
+    if [ -z "$claude_url" ]; then
+        echo "⚠️  Could not find download URL in page, using known fallback URL" >&2
+        claude_url="$fallback_url"
+    else
+        echo "✅ Found Claude Desktop download URL: $claude_url" >&2
+        
+        # Quick validation: check if the URL is accessible
+        if ! curl --max-time 10 -sI "$claude_url" >/dev/null 2>&1; then
+            echo "⚠️  Found URL is not accessible, using fallback URL" >&2
+            claude_url="$fallback_url"
+        fi
+    fi
+    
+    echo "$claude_url"
+    return 0
+}
+
+# Get the latest Claude Desktop download URL
+# CLAUDE_DOWNLOAD_URL=$(get_latest_claude_url)
+# if [ $? -ne 0 ]; then
+#     echo "❌ Failed to get latest download URL, exiting..."
+#     exit 1
+# fi
+
 CLAUDE_DOWNLOAD_URL="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe"
+
+
+set -x
+
+echo AAAAAAAAAAAAAAAAAAAAAA
+
 
 # Inclusive check for Fedora-based system
 is_fedora_based() {
@@ -23,8 +96,16 @@ if ! is_fedora_based; then
     exit 1
 fi
 
-# Check for root/sudo
+# Check for root/sudo or container environment
 IS_SUDO=false
+IS_CONTAINER=false
+
+# Check if we're running in a container (where dependencies are pre-installed)
+if [ -f "/.dockerenv" ] || [ -n "${CONTAINER}" ] || [ -d "/workspace" ]; then
+    IS_CONTAINER=true
+    echo "📦 Detected container environment, skipping sudo check"
+fi
+
 if [ "$EUID" -eq 0 ]; then
     IS_SUDO=true
     # Check if running via sudo (and not directly as root)
@@ -36,8 +117,8 @@ if [ "$EUID" -eq 0 ]; then
         ORIGINAL_USER="root"
         ORIGINAL_HOME="/root"
     fi
-else
-    echo "Please run with sudo to install dependencies"
+elif [ "$IS_CONTAINER" = false ]; then
+    echo "Please run with sudo to install dependencies (or use the containerized version with 'make run')"
     exit 1
 fi
 
@@ -114,15 +195,17 @@ for cmd in sqlite3 7z wget wrestool icotool convert npx rpm rpmbuild; do
     fi
 done
 
-# Install system dependencies if any
-if [ ! -z "$DEPS_TO_INSTALL" ]; then
+# Install system dependencies if any (skip in container)
+if [ "$IS_CONTAINER" = false ] && [ ! -z "$DEPS_TO_INSTALL" ]; then
     echo "Installing system dependencies: $DEPS_TO_INSTALL"
     dnf install -y $DEPS_TO_INSTALL
     echo "System dependencies installed successfully"
+elif [ "$IS_CONTAINER" = true ]; then
+    echo "📦 Running in container, system dependencies already installed"
 fi
 
-# Install electron globally via npm if not present
-if ! check_command "electron"; then
+# Install electron globally via npm if not present (skip in container)
+if [ "$IS_CONTAINER" = false ] && ! check_command "electron"; then
     echo "Installing electron via npm..."
     npm install -g electron
     if ! check_command "electron"; then
@@ -131,6 +214,8 @@ if ! check_command "electron"; then
         exit 1
     fi
     echo "Electron installed successfully"
+elif [ "$IS_CONTAINER" = true ]; then
+    echo "📦 Running in container, electron already installed"
 fi
 
 PACKAGE_NAME="claude-desktop"
@@ -139,13 +224,24 @@ MAINTAINER="Claude Desktop Linux Maintainers"
 DESCRIPTION="Claude Desktop for Linux"
 
 # Create working directories
-WORK_DIR="$(pwd)/build"
+WORK_DIR="/workspace/build"
 FEDORA_ROOT="$WORK_DIR/fedora-package"
 INSTALL_DIR="$FEDORA_ROOT/usr"
 
+# Ensure we're in the right starting directory
+echo "📦 Initial working directory: $(pwd)"
+echo "📦 WORK_DIR set to: $WORK_DIR"
+
 # Clean previous build
-rm -rf "$WORK_DIR"
-mkdir -p "$WORK_DIR"
+if [ "$IS_CONTAINER" = true ]; then
+    # In container, just clean the contents instead of removing the directory (it might be a mount)
+    echo "🧹 Cleaning previous build directory contents..."
+    rm -rf "$WORK_DIR"/* "$WORK_DIR"/.* 2>/dev/null || true
+    mkdir -p "$WORK_DIR"
+else
+    rm -rf "$WORK_DIR"
+    mkdir -p "$WORK_DIR"
+fi
 mkdir -p "$FEDORA_ROOT/FEDORA"
 mkdir -p "$INSTALL_DIR/lib/$PACKAGE_NAME"
 mkdir -p "$INSTALL_DIR/share/applications"
@@ -343,8 +439,34 @@ module.exports = {
 EOF
 
 # Copy app files
+echo "📦 About to copy app files"
 cp app.asar "$INSTALL_DIR/lib/$PACKAGE_NAME/"
 cp -r app.asar.unpacked "$INSTALL_DIR/lib/$PACKAGE_NAME/"
+echo "📦 App files copied successfully"
+
+# Return to work directory and download electron
+echo "📦 Current directory before cd: $(pwd)"
+echo "📦 WORK_DIR is: $WORK_DIR"
+cd "$WORK_DIR" || { echo "❌ Failed to change to work directory: $WORK_DIR"; exit 1; }
+echo "📦 Current directory after cd: $(pwd)"
+echo "📦 Downloading Electron for bundling..."
+
+ELECTRON_VERSION="v37.0.0"
+ELECTRON_URL="https://github.com/electron/electron/releases/download/${ELECTRON_VERSION}/electron-${ELECTRON_VERSION}-linux-x64.zip"
+ELECTRON_ZIP="electron-${ELECTRON_VERSION}-linux-x64.zip"
+
+wget "$ELECTRON_URL" -O "$ELECTRON_ZIP"
+if [ $? -ne 0 ]; then
+    echo "❌ Failed to download electron"
+    exit 1
+fi
+
+# Extract electron to the package
+echo "📦 Extracting Electron to package..."
+mkdir -p "$INSTALL_DIR/lib/$PACKAGE_NAME/electron"
+unzip -q "$ELECTRON_ZIP" -d "$INSTALL_DIR/lib/$PACKAGE_NAME/electron"
+chmod +x "$INSTALL_DIR/lib/$PACKAGE_NAME/electron/electron"
+echo "✓ Electron bundled successfully"
 
 # Create desktop entry
 cat > "$INSTALL_DIR/share/applications/claude-desktop.desktop" << EOF
@@ -359,11 +481,28 @@ MimeType=x-scheme-handler/claude;
 StartupWMClass=Claude
 EOF
 
-# Create launcher script with Wayland flags and logging
+# Create launcher script with bundled Electron
 cat > "$INSTALL_DIR/bin/claude-desktop" << EOF
 #!/bin/bash
 LOG_FILE="\$HOME/claude-desktop-launcher.log"
-electron /usr/lib64/claude-desktop/app.asar --ozone-platform-hint=auto --enable-logging=file --log-file=\$LOG_FILE --log-level=INFO "\$@"
+
+# Set environment to avoid GTK conflicts
+export GDK_BACKEND=x11
+export GTK_USE_PORTAL=0
+export ELECTRON_DISABLE_SECURITY_WARNINGS=true
+
+# Use bundled electron
+ELECTRON_CMD="/usr/lib64/claude-desktop/electron/electron"
+
+# Check if bundled electron exists
+if [ ! -x "\$ELECTRON_CMD" ]; then
+    echo "❌ Error: Bundled electron not found at \$ELECTRON_CMD" >&2
+    echo "The Claude Desktop installation may be corrupted." >&2
+    exit 1
+fi
+
+# Launch Claude Desktop with proper flags
+\$ELECTRON_CMD /usr/lib64/claude-desktop/app.asar --ozone-platform-hint=auto --enable-logging=file --log-file=\$LOG_FILE --log-level=INFO --disable-gpu-sandbox --no-sandbox "\$@"
 EOF
 chmod +x "$INSTALL_DIR/bin/claude-desktop"
 
@@ -410,8 +549,11 @@ update-desktop-database %{_datadir}/applications || :
 # Set correct permissions for chrome-sandbox
 echo "Setting chrome-sandbox permissions..."
 SANDBOX_PATH=""
-# Check for sandbox in locally packaged electron first
-if [ -f "/usr/lib64/claude-desktop/app.asar.unpacked/node_modules/electron/dist/chrome-sandbox" ]; then
+# Check for sandbox in bundled electron first
+if [ -f "/usr/lib64/claude-desktop/electron/chrome-sandbox" ]; then
+    SANDBOX_PATH="/usr/lib64/claude-desktop/electron/chrome-sandbox"
+# Check for sandbox in locally packaged electron
+elif [ -f "/usr/lib64/claude-desktop/app.asar.unpacked/node_modules/electron/dist/chrome-sandbox" ]; then
     SANDBOX_PATH="/usr/lib64/claude-desktop/app.asar.unpacked/node_modules/electron/dist/chrome-sandbox"
 
 elif [ -n "$SUDO_USER" ]; then
@@ -444,6 +586,9 @@ else
     echo "Warning: chrome-sandbox binary not found. Sandbox may not function correctly."
 fi
 
+echo "✓ Claude Desktop installed with bundled Electron"
+echo "You can now run: claude-desktop"
+
 %changelog
 * $(date '+%a %b %d %Y') ${MAINTAINER} ${VERSION}-1
 - Initial package
@@ -453,13 +598,24 @@ EOF
 echo "📦 Building RPM package..."
 mkdir -p "${WORK_DIR}"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
-RPM_FILE="$(pwd)/x86_64/claude-desktop-${VERSION}-1.fc41.$(uname -m).rpm"
+# Detect Fedora version for RPM filename
+FEDORA_VERSION=$(cat /etc/fedora-release | grep -oP 'release \K[0-9]+')
+RPM_FILE="$(pwd)/x86_64/claude-desktop-${VERSION}-1.fc${FEDORA_VERSION}.$(uname -m).rpm"
 if rpmbuild -bb \
     --define "_topdir ${WORK_DIR}" \
     --define "_rpmdir $(pwd)" \
     "${WORK_DIR}/claude-desktop.spec"; then
     echo "✓ RPM package built successfully at: $RPM_FILE"
-    echo "🎉 Done! You can now install the RPM with: dnf install $RPM_FILE"
+    
+    # If running in container, copy output to /output directory
+    if [ -d "/output" ] && [ -w "/output" ]; then
+        echo "📦 Copying RPM to output directory..."
+        cp "$RPM_FILE" /output/
+        echo "✓ RPM copied to /output/$(basename "$RPM_FILE")"
+        echo "🎉 Done! RPM available in output directory"
+    else
+        echo "🎉 Done! You can now install the RPM with: dnf install $RPM_FILE"
+    fi
 else
     echo "❌ Failed to build RPM package"
     exit 1
