@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  claude-builder:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: claude-desktop-fedora-builder
+    volumes:
+      - ./output:/output:Z
+      - ./build:/workspace/build:Z
+    environment:
+      - CONTAINER=docker
+    user: "1000:1000"
+    # Remove container after completion
+    # docker-compose run --rm claude-builder
+    stdin_open: true
+    tty: true
+
+  # Interactive shell service
+  claude-shell:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: claude-desktop-fedora-shell
+    volumes:
+      - ./output:/output:Z
+      - ./build:/workspace/build:Z
+    environment:
+      - CONTAINER=docker
+    user: "1000:1000"
+    entrypoint: /bin/bash
+    stdin_open: true
+    tty: true
+
+volumes:
+  build_cache:
+    driver: local 
